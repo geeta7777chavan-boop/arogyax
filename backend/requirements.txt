@@ -1,0 +1,75 @@
+# ============================================================
+#  PHARMA AGENTIC SYSTEM — Python Dependencies
+#  Install: pip install -r requirements.txt
+# ============================================================
+
+# ── Web Framework ────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12          # file uploads (prescriptions)
+httpx==0.27.2                     # async HTTP client
+
+# ── Database ─────────────────────────────────────────────────
+supabase==2.10.0
+postgrest==0.18.0                 # comes with supabase, pinned for safety
+
+# ── AI / LLM / Agent Framework ───────────────────────────────
+langchain==0.3.7
+langchain-core==0.3.19
+langchain-community==0.3.7
+langgraph==0.2.56                 # multi-agent orchestration
+langchain-groq==0.2.1             # Groq LLM provider (Llama 3.3 70B)
+groq==0.11.0                      # Groq SDK (Whisper + LLM)
+openai==1.54.4                    # fallback / embeddings
+
+# ── Observability ─────────────────────────────────────────────
+langfuse==2.53.8                  # MANDATORY — trace logs for judges
+
+# ── Data Processing ───────────────────────────────────────────
+pandas==2.2.3
+numpy==1.26.4
+python-dateutil==2.9.0
+
+# ── Environment & Config ──────────────────────────────────────
+python-dotenv==1.0.1
+pydantic==2.9.2
+pydantic-settings==2.6.1
+
+# ── Async & Utilities ─────────────────────────────────────────
+aiohttp==3.10.10
+anyio==4.6.2
+tenacity==9.0.0                   # retry logic for agent tool calls
+APScheduler==3.10.4               # scheduled tasks for automatic refill checks
+
+# ── Webhook / Automation ──────────────────────────────────────
+requests==2.31.0
+urllib3==2.0.7                    # pinned for requests compatibility
+charset-normalizer==3.3.2         # pinned for requests compatibility
+# IMPORTANT: Do NOT install chardet - it conflicts with charset_normalizer
+
+# ── Notifications (Optional Bonus) ────────────────────────────
+twilio==9.3.6                     # WhatsApp + SMS via Twilio - REMOVED
+
+# ── Email ─────────────────────────────────────────────────────
+sendgrid==6.11.0                  # transactional email (or use SMTP below)
+# smtplib is built-in — no install needed
+
+# ── Audio / Speech ────────────────────────────────────────────
+# Whisper transcription is done via Groq API — no local model needed
+# If you want local fallback:
+# openai-whisper==20240930
+# torch==2.4.1
+
+# ── Dev / Testing ─────────────────────────────────────────────
+pytest==8.3.3
+pytest-asyncio==0.24.0
+httpx==0.27.2                     # also used for TestClient
+
+#Install PaddleOCR dependencies
+paddlepaddle>=2.5.0
+paddleocr>=2.7.0
+Pillow>=10.0.0
+
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+langchain==0.3.7

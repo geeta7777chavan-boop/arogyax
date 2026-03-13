@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@theme {
+  /* ── Fonts ──────────────────────────────────────────────── */
+  --font-display: "Syne", sans-serif;
+  --font-body:    "DM Sans", sans-serif;
+  --font-mono:    "JetBrains Mono", monospace;
+
+  /* ── Brand colours ──────────────────────────────────────── */
+  --color-brand-50:  #f0fdf9;
+  --color-brand-100: #ccfbef;
+  --color-brand-400: #2dd4a0;
+  --color-brand-500: #10b981;
+  --color-brand-600: #059669;
+  --color-brand-900: #064e3b;
+
+  /* ── Surface colours ─────────────────────────────────────── */
+  --color-surface-0: #0a0f0d;
+  --color-surface-1: #111916;
+  --color-surface-2: #192620;
+  --color-surface-3: #1f3129;
+
+  /* ── Ink (text) colours ──────────────────────────────────── */
+  --color-ink-primary:   #e8f5f0;
+  --color-ink-secondary: #8aada0;
+  --color-ink-muted:     #4a6b5e;
+
+  /* ── Animations ──────────────────────────────────────────── */
+  --animate-fade-up:    fadeUp 0.5s ease forwards;
+  --animate-pulse-slow: pulse 3s ease-in-out infinite;
+  --animate-blink:      blink 1.2s step-end infinite;
+
+  @keyframes fadeUp {
+    0%   { opacity: 0; transform: translateY(12px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0; }
+  }
+}
+
+@layer base {
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root { color-scheme: dark; }
+
+  body {
+    background-color: var(--color-surface-0);
+    color: var(--color-ink-primary);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar       { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #1f3129; border-radius: 99px; }
+  ::-webkit-scrollbar-thumb:hover { background: #2dd4a0; }
+
+  html { scroll-behavior: smooth; }
+}

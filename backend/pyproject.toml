@@ -1,0 +1,40 @@
+[tool.uv]
+dev-dependencies = []
+
+[project]
+name = "pharmai-backend"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.115.5",
+    "uvicorn[standard]==0.32.1",
+    "python-multipart==0.0.12",
+    "httpx==0.27.2",
+    "supabase==2.10.0",
+    "postgrest==0.18.0",
+    "langchain==0.3.7",
+    "langchain-core==0.3.19",
+    "langchain-community==0.3.7",
+    "langgraph==0.2.56",
+    "langchain-groq==0.2.1",
+    "groq==0.11.0",
+    "openai==1.54.4",
+    "langfuse==2.53.8",
+    "pandas==2.2.3",
+    "numpy==1.26.4",
+    "python-dateutil==2.9.0",
+    "python-dotenv==1.0.1",
+    "pydantic==2.9.2",
+    "pydantic-settings==2.6.1",
+    "aiohttp==3.10.10",
+    "anyio==4.6.2",
+    "tenacity==9.0.0",
+    "APScheduler==3.10.4",
+    "requests==2.31.0",
+    "urllib3==2.0.7",
+    "charset-normalizer==3.3.2",
+    "sendgrid==6.11.0",
+    "pytest==8.3.3",
+    "pytest-asyncio==0.24.0",
+]
+
