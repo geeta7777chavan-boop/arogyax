@@ -31,9 +31,9 @@ from core.database import supabase
 CURRENCY_SYMBOL = "€"
 
 # SendGrid SMTP constants
-SMTP_HOST = "smtp.sendgrid.net"
+SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
-SMTP_USER = "apikey"   # literally the string "apikey" — SendGrid requirement
+SMTP_USER = None  # set from EMAIL_FROM at runtime
 
 
 # ── Patient contact lookup ────────────────────────────────────────────────────
@@ -62,16 +62,24 @@ def _get_patient_contact(patient_id: str) -> tuple[str, str, str]:
 
 def _send_email(to: str, subject: str, html: str, text: str = None) -> dict:
     """
-    Send email via SendGrid SMTP. Never raises.
-    Falls back to mock/log if credentials are missing.
+    Send email via Gmail SMTP using an App Password.
+    Never raises. Falls back to mock/log if credentials are missing.
     Returns {"success": bool, "error": str}
+
+    Required .env vars:
+      EMAIL_FROM=arogyax213@gmail.com
+      GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx   (16-char Google App Password)
+      EMAIL_FROM_NAME=ArogyaX
     """
+    # ── Resolve credentials ────────────────────────────────────────────────
+    smtp_user     = getattr(settings, "EMAIL_FROM", "") or ""
+    smtp_password = getattr(settings, "GMAIL_APP_PASSWORD", "") or ""
+
     # ── No credentials → mock log ──────────────────────────────────────────
-    if not settings.SENDGRID_API_KEY:
+    if not smtp_password:
         print(f"\n{'─'*50}")
-        print(f"[Email MOCK - SendGrid not configured]")
-        print(f"To: {to}")
-        print(f"Subject: {subject}")
+        print(f"[Email MOCK — GMAIL_APP_PASSWORD not set]")
+        print(f"To: {to} | Subject: {subject}")
         print(f"{'─'*50}\n")
         return {"success": True, "mock": True}
 
@@ -81,27 +89,27 @@ def _send_email(to: str, subject: str, html: str, text: str = None) -> dict:
     # ── Build MIME message ─────────────────────────────────────────────────
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"]    = f"{settings.EMAIL_FROM_NAME} <{settings.EMAIL_FROM}>"
+    msg["From"]    = f"{settings.EMAIL_FROM_NAME} <{smtp_user}>"
     msg["To"]      = to
 
     if text:
         msg.attach(MIMEText(text, "plain", "utf-8"))
     msg.attach(MIMEText(html, "html", "utf-8"))
 
-    # ── Send via SMTP ──────────────────────────────────────────────────────
+    # ── Send via Gmail SMTP ────────────────────────────────────────────────
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
             server.ehlo()
             server.starttls()
             server.ehlo()
-            server.login(SMTP_USER, settings.SENDGRID_API_KEY)
-            server.sendmail(settings.EMAIL_FROM, to, msg.as_string())
+            server.login(smtp_user, smtp_password.replace(" ", ""))  # strip spaces if any
+            server.sendmail(smtp_user, to, msg.as_string())
 
         print(f"[Email] ✅ Sent to {to} | Subject: {subject}")
         return {"success": True}
 
     except smtplib.SMTPAuthenticationError:
-        err = "SMTP auth failed — check SENDGRID_API_KEY in .env"
+        err = "Gmail auth failed — check EMAIL_FROM and GMAIL_APP_PASSWORD in .env"
         print(f"[Email] ❌ {err}")
         return {"success": False, "error": err}
 
