@@ -234,4 +234,3 @@ def scheduler_status():
         "scheduler_available"        : True,
         "email_notifications_enabled": settings.ENABLE_EMAIL_NOTIFICATIONS,
     }
-    }
