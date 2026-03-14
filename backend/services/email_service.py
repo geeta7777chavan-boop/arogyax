@@ -58,19 +58,31 @@ def _get_patient_contact(patient_id: str) -> tuple[str, str, str]:
     return "", "Customer", settings.USER_PHONE_FALLBACK
 
 
-# ── Core send function — tries SendGrid HTTP first, falls back to SMTP 2525 ───
+# ── Core send function — Resend API (port 443, works on Railway) ─────────────
 
 def _send_email(to: str, subject: str, html: str, text: str = None) -> dict:
     """
-    Send email using SendGrid HTTP API (port 443).
-    Railway blocks port 587 but allows port 443 — so we use HTTP API directly.
-    Never raises. Falls back to mock/log if credentials are missing.
+    Send email using Resend API (port 443 HTTPS).
+    Works on Railway, Render, and all cloud platforms.
+    Falls back to Gmail SMTP for local development.
+    Never raises.
+
+    Railway env vars needed:
+      RESEND_API_KEY=re_xxxxxxxxxxxxxxxx
+      EMAIL_FROM=onboarding@resend.dev  (or your verified domain)
+      EMAIL_FROM_NAME=ArogyaX
+
+    Local .env:
+      GMAIL_APP_PASSWORD=xxxx  (used as fallback when RESEND_API_KEY not set)
     """
-    api_key = getattr(settings, "SENDGRID_API_KEY", "") or ""
-    gmail_pass = getattr(settings, "GMAIL_APP_PASSWORD", "") or ""
+    import urllib.request
+    import json as _json
+
+    resend_key = getattr(settings, "RESEND_API_KEY", "") or ""
+    gmail_pass  = getattr(settings, "GMAIL_APP_PASSWORD", "") or ""
 
     # ── No credentials → mock log ──────────────────────────────────────────
-    if not api_key and not gmail_pass:
+    if not resend_key and not gmail_pass:
         print(f"\n{'─'*50}")
         print(f"[Email MOCK — no credentials set]")
         print(f"To: {to} | Subject: {subject}")
@@ -80,30 +92,22 @@ def _send_email(to: str, subject: str, html: str, text: str = None) -> dict:
     if not to:
         return {"success": False, "error": "No recipient email provided"}
 
-    # ── Try SendGrid HTTP API first (port 443 — works everywhere) ──────────
-    if api_key:
+    # ── Try Resend API first (works on Railway) ────────────────────────────
+    if resend_key:
         try:
-            import urllib.request
-            import json as _json
-
             payload = _json.dumps({
-                "personalizations": [{"to": [{"email": to}]}],
-                "from": {
-                    "email": settings.EMAIL_FROM,
-                    "name":  settings.EMAIL_FROM_NAME,
-                },
+                "from":    f"{settings.EMAIL_FROM_NAME} <{settings.EMAIL_FROM}>",
+                "to":      [to],
                 "subject": subject,
-                "content": [
-                    {"type": "text/plain", "value": text or ""},
-                    {"type": "text/html",  "value": html},
-                ],
+                "html":    html,
+                "text":    text or "",
             }).encode("utf-8")
 
             req = urllib.request.Request(
-                "https://api.sendgrid.com/v3/mail/send",
+                "https://api.resend.com/emails",
                 data=payload,
                 headers={
-                    "Authorization": f"Bearer {api_key}",
+                    "Authorization": f"Bearer {resend_key}",
                     "Content-Type":  "application/json",
                 },
                 method="POST",
@@ -111,14 +115,15 @@ def _send_email(to: str, subject: str, html: str, text: str = None) -> dict:
 
             with urllib.request.urlopen(req, timeout=30) as resp:
                 status = resp.status
+                body   = _json.loads(resp.read().decode())
 
-            print(f"[Email] ✅ Sent via SendGrid HTTP to {to} | Status: {status}")
-            return {"success": True, "status_code": status}
+            print(f"[Email] ✅ Sent via Resend to {to} | id: {body.get('id')}")
+            return {"success": True, "id": body.get("id")}
 
         except Exception as e:
-            print(f"[Email] ⚠️ SendGrid HTTP failed: {e} — trying SMTP fallback")
+            print(f"[Email] ⚠️ Resend failed: {e} — trying Gmail SMTP fallback")
 
-    # ── Fallback: Gmail SMTP port 587 (works locally, blocked on Railway) ──
+    # ── Fallback: Gmail SMTP (works locally, may be blocked on Railway) ────
     if gmail_pass:
         try:
             msg = MIMEMultipart("alternative")

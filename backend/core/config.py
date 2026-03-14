@@ -50,7 +50,8 @@ class Settings(BaseSettings):
     # Get App Password: myaccount.google.com → Security → App passwords
     EMAIL_FROM:          str = "arogyax213@gmail.com"
     EMAIL_FROM_NAME:     str = "ArogyaX"
-    GMAIL_APP_PASSWORD:  str = ""   # 16-char Google App Password (no spaces)
+    GMAIL_APP_PASSWORD:  str = ""   # 16-char Google App Password (local dev)
+    RESEND_API_KEY:      str = ""   # re_xxxxxxxx — production (Railway/Render)
 
     # ── SendGrid (kept for fallback / legacy — not used if GMAIL_APP_PASSWORD set) ──
     SENDGRID_API_KEY:  str = ""
