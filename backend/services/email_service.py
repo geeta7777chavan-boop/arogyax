@@ -1,20 +1,27 @@
 """
 services/email_service.py
 =========================
-Email notifications using SendGrid SMTP for ArogyaX.
+Email notifications for ArogyaX.
 
-Required env vars:
-  SENDGRID_API_KEY  - your SendGrid API key (used as SMTP password)
-  EMAIL_FROM        - sender email (e.g., arogyax213@gmail.com)
-  EMAIL_FROM_NAME   - sender name (e.g., ArogyaX)
+Production (Railway): uses SendGrid HTTP API (port 443 — never blocked)
+Local development:    uses Gmail SMTP (port 587)
 
-Uses SMTP (port 587) instead of the SendGrid HTTP library to avoid
-DNS resolution failures (getaddrinfo failed) on restricted networks.
+Railway env vars required:
+  SENDGRID_API_KEY=SG.xxxx
+  EMAIL_FROM=arogyax213@gmail.com
+  EMAIL_FROM_NAME=ArogyaX
+
+Local .env:
+  GMAIL_APP_PASSWORD=xxxxxxxxxxxxxxxxxxxx
+  EMAIL_FROM=arogyax213@gmail.com
+  EMAIL_FROM_NAME=ArogyaX
 """
 
 import sys
 import smtplib
 import threading
+import urllib.request as _urllib
+import json as _json
 from pathlib import Path
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
@@ -27,19 +34,12 @@ if str(_BACKEND_DIR) not in sys.path:
 from core.config import settings
 from core.database import supabase
 
-# Currency symbol
 CURRENCY_SYMBOL = "€"
-
-# SendGrid SMTP constants
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
-SMTP_USER = None  # set from EMAIL_FROM at runtime
 
 
 # ── Patient contact lookup ────────────────────────────────────────────────────
 
 def _get_patient_contact(patient_id: str) -> tuple[str, str, str]:
-    """Returns (email, name, phone) for a patient."""
     try:
         resp = (
             supabase.table("users")
@@ -58,78 +58,94 @@ def _get_patient_contact(patient_id: str) -> tuple[str, str, str]:
     return "", "Customer", settings.USER_PHONE_FALLBACK
 
 
-# ── Core send function — Gmail SMTP SSL port 465 ─────────────────────────────
+# ── Core send — SendGrid HTTP (production) + Gmail SMTP (local fallback) ──────
 
 def _send_email(to: str, subject: str, html: str, text: str = None) -> dict:
     """
-    Send email via Gmail SMTP SSL (port 465).
-    Port 465 works on Railway/Render unlike port 587 which is blocked.
-    Never raises. Returns {"success": bool}
+    1. Tries SendGrid HTTP API (port 443) — works on Railway, Render, all clouds
+    2. Falls back to Gmail SMTP (port 587) — works locally
+    Never raises.
     """
-    gmail_user = getattr(settings, "EMAIL_FROM", "") or ""
+    if not to:
+        return {"success": False, "error": "No recipient"}
+
+    from_email = getattr(settings, "EMAIL_FROM", "") or ""
+    from_name  = getattr(settings, "EMAIL_FROM_NAME", "ArogyaX") or "ArogyaX"
+    sg_key     = getattr(settings, "SENDGRID_API_KEY", "") or ""
     gmail_pass = getattr(settings, "GMAIL_APP_PASSWORD", "") or ""
 
-    # ── No credentials → mock log ──────────────────────────────────────────
-    if not gmail_pass:
-        print(f"\n{'─'*50}")
-        print(f"[Email MOCK — GMAIL_APP_PASSWORD not set]")
-        print(f"To: {to} | Subject: {subject}")
-        print(f"{'─'*50}\n")
+    # ── No credentials at all → mock ──────────────────────────────────────
+    if not sg_key and not gmail_pass:
+        print(f"[Email MOCK] To:{to} | {subject}")
         return {"success": True, "mock": True}
 
-    if not to:
-        return {"success": False, "error": "No recipient email provided"}
+    # ── 1. SendGrid HTTP API (always try first — works on Railway) ─────────
+    if sg_key:
+        try:
+            payload = _json.dumps({
+                "personalizations": [{"to": [{"email": to}]}],
+                "from": {"email": from_email, "name": from_name},
+                "subject": subject,
+                "content": [
+                    {"type": "text/plain", "value": text or ""},
+                    {"type": "text/html",  "value": html},
+                ],
+            }).encode("utf-8")
 
-    # ── Build MIME message ─────────────────────────────────────────────────
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"]    = f"{settings.EMAIL_FROM_NAME} <{gmail_user}>"
-    msg["To"]      = to
-    if text:
-        msg.attach(MIMEText(text, "plain", "utf-8"))
-    msg.attach(MIMEText(html, "html", "utf-8"))
+            req = _urllib.Request(
+                "https://api.sendgrid.com/v3/mail/send",
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {sg_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with _urllib.urlopen(req, timeout=30) as resp:
+                status = resp.status
 
-    # ── Try port 465 (SSL) first — works on Railway ────────────────────────
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
-            server.ehlo()
-            server.login(gmail_user, gmail_pass.replace(" ", ""))
-            server.sendmail(gmail_user, to, msg.as_string())
-        print(f"[Email] ✅ Sent via Gmail SSL (465) to {to}")
-        return {"success": True}
-    except Exception as e:
-        print(f"[Email] ⚠️ Port 465 failed: {e} — trying port 587")
+            print(f"[Email] ✅ Sent via SendGrid to {to} | status: {status}")
+            return {"success": True, "status_code": status}
 
-    # ── Fallback: port 587 (TLS) — works locally ──────────────────────────
-    try:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(gmail_user, gmail_pass.replace(" ", ""))
-            server.sendmail(gmail_user, to, msg.as_string())
-        print(f"[Email] ✅ Sent via Gmail TLS (587) to {to}")
-        return {"success": True}
-    except Exception as e:
-        err = str(e)
-        print(f"[Email] ❌ Failed to send to {to}: {err}")
-        return {"success": False, "error": err}
+        except Exception as e:
+            print(f"[Email] ⚠️ SendGrid failed: {e} — trying Gmail SMTP")
+
+    # ── 2. Gmail SMTP fallback (local dev) ─────────────────────────────────
+    if gmail_pass:
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"]    = f"{from_name} <{from_email}>"
+            msg["To"]      = to
+            if text:
+                msg.attach(MIMEText(text, "plain", "utf-8"))
+            msg.attach(MIMEText(html, "html", "utf-8"))
+
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(from_email, gmail_pass.replace(" ", ""))
+                server.sendmail(from_email, to, msg.as_string())
+
+            print(f"[Email] ✅ Sent via Gmail SMTP to {to}")
+            return {"success": True}
+
+        except Exception as e:
+            print(f"[Email] ❌ Gmail SMTP failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    return {"success": False, "error": "No working email method"}
 
 
-# ── Fire-and-forget wrapper — doesn't block the agent pipeline ───────────────
+# ── Fire-and-forget background sender ────────────────────────────────────────
 
 def _send_email_bg(to: str, subject: str, html: str, text: str = None) -> None:
-    """
-    Send email in a background thread so the API response is instant.
-    The email arrives a few seconds later but the user gets their
-    order confirmation immediately without waiting.
-    """
-    thread = threading.Thread(
+    threading.Thread(
         target=_send_email,
         args=(to, subject, html, text),
-        daemon=True,   # thread dies if main process exits — safe for this use case
-    )
-    thread.start()
+        daemon=True,
+    ).start()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -150,10 +166,9 @@ def send_order_confirmation_email(
     unit_price: float = 0.0,
     package_size: str = "",
     prescription_verified: bool = False,
-    sync: bool = False,   # accepted but ignored — email always sends in background
-    **kwargs,             # absorb any other unexpected keyword args gracefully
+    sync: bool = False,
+    **kwargs,
 ) -> dict:
-    """Send a beautiful order confirmation email with detailed order information."""
 
     payment_label = "Cash on Delivery" if payment_method == "cash_on_delivery" else "Online Payment"
     amount_label  = "Amount to Pay" if payment_method == "cash_on_delivery" else "Amount Paid"
@@ -161,11 +176,9 @@ def send_order_confirmation_email(
 
     if not order_date:
         order_date = datetime.now().strftime("%d %B %Y")
-
     if not estimated_delivery:
         tomorrow = datetime.now() + timedelta(days=1)
         estimated_delivery = f"{tomorrow.strftime('%d %B %Y')} between 10 AM – 2 PM"
-
     if not delivery_address:
         delivery_address = "Address not provided"
 
@@ -175,170 +188,117 @@ def send_order_confirmation_email(
     html = f"""
     <!DOCTYPE html>
     <html>
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    </head>
-    <body style="margin:0; padding:0; background-color:#f5f5f5; font-family:'Segoe UI', Arial, sans-serif;">
-        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f5f5; padding:20px;">
+    <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+    <body style="margin:0;padding:0;background-color:#f5f5f5;font-family:'Segoe UI',Arial,sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f5f5;padding:20px;">
+    <tr><td align="center">
+    <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.1);">
+        <tr><td style="background:linear-gradient(135deg,#0d9488,#14b8a6);padding:30px;text-align:center;">
+            <h1 style="color:#fff;margin:0;font-size:28px;">🌿 ArogyaX</h1>
+            <p style="color:#ccfbf1;margin:5px 0 0;font-size:14px;">Your Trusted Pharmacy Partner</p>
+        </td></tr>
+        <tr><td style="padding:30px 30px 10px;text-align:center;">
+            <span style="font-size:50px;">✅</span>
+            <h2 style="color:#065f46;margin:15px 0 5px;font-size:24px;">Order Confirmed!</h2>
+            <p style="color:#6b7280;margin:0;font-size:14px;">Thank you {patient_name} for shopping with us!</p>
+        </td></tr>
+        <tr><td style="padding:20px 30px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:8px;border:1px solid #e5e7eb;overflow:hidden;">
+            <tr style="background:#0d9488;color:#fff;">
+                <th style="padding:12px 15px;text-align:left;font-size:12px;text-transform:uppercase;">Order Details</th>
+                <th style="padding:12px 15px;text-align:right;font-size:12px;text-transform:uppercase;">Value</th>
+            </tr>
             <tr>
-                <td align="center">
-                    <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 4px 12px rgba(0,0,0,0.1);">
-                        <tr>
-                            <td style="background:linear-gradient(135deg, #0d9488 0%, #14b8a6 100%); padding:30px; text-align:center;">
-                                <h1 style="color:#ffffff; margin:0; font-size:28px; font-weight:600;">🌿 ArogyaX</h1>
-                                <p style="color:#ccfbf1; margin:5px 0 0 0; font-size:14px;">Your Trusted Pharmacy Partner</p>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="padding:30px 30px 10px 30px; text-align:center;">
-                                <div style="width:80px; height:80px; background-color:#d1fae5; border-radius:50%; display:inline-flex; align-items:center; justify-content:center;">
-                                    <span style="font-size:40px;">✅</span>
-                                </div>
-                                <h2 style="color:#065f46; margin:15px 0 5px 0; font-size:24px;">Order Confirmed!</h2>
-                                <p style="color:#6b7280; margin:0; font-size:14px;">Thank you {patient_name} for shopping with us!</p>
-                                <p style="color:#065f46; margin:10px 0 0 0; font-size:16px; font-weight:600;">Your order has been successfully placed and is now being prepared.</p>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="padding:20px 30px;">
-                                <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f9fafb; border-radius:8px; border:1px solid #e5e7eb; overflow:hidden;">
-                                    <tr style="background-color:#0d9488; color:#ffffff;">
-                                        <th style="padding:12px 15px; text-align:left; font-size:12px; text-transform:uppercase;">Order Details</th>
-                                        <th style="padding:12px 15px; text-align:right; font-size:12px; text-transform:uppercase;">Value</th>
-                                    </tr>
-                                    <tr>
-                                        <td style="padding:12px 15px; border-bottom:1px solid #e5e7eb;">
-                                            <p style="color:#6b7280; margin:0; font-size:11px; text-transform:uppercase;">Order ID</p>
-                                            <p style="color:#111827; margin:5px 0 0 0; font-size:14px; font-weight:600;">#{short_id}</p>
-                                        </td>
-                                        <td style="padding:12px 15px; border-bottom:1px solid #e5e7eb; text-align:right;">
-                                            <p style="color:#6b7280; margin:0; font-size:11px; text-transform:uppercase;">Order Date</p>
-                                            <p style="color:#111827; margin:5px 0 0 0; font-size:14px;">{order_date}</p>
-                                        </td>
-                                    </tr>
-                                    <tr>
-                                        <td style="padding:12px 15px; border-bottom:1px solid #e5e7eb;">
-                                            <p style="color:#6b7280; margin:0; font-size:11px; text-transform:uppercase;">Delivery Address</p>
-                                            <p style="color:#111827; margin:5px 0 0 0; font-size:14px;">{delivery_address}</p>
-                                        </td>
-                                        <td style="padding:12px 15px; border-bottom:1px solid #e5e7eb; text-align:right;">
-                                            <p style="color:#6b7280; margin:0; font-size:11px; text-transform:uppercase;">Estimated Delivery</p>
-                                            <p style="color:#059669; margin:5px 0 0 0; font-size:14px; font-weight:600;">{estimated_delivery}</p>
-                                        </td>
-                                    </tr>
-                                    <tr>
-                                        <td style="padding:12px 15px;">
-                                            <p style="color:#6b7280; margin:0; font-size:11px; text-transform:uppercase;">Payment Method</p>
-                                            <p style="color:#111827; margin:5px 0 0 0; font-size:14px;">{payment_label}</p>
-                                        </td>
-                                        <td style="padding:12px 15px; text-align:right;">
-                                            <p style="color:#6b7280; margin:0; font-size:11px; text-transform:uppercase;">{amount_label}</p>
-                                            <p style="color:#059669; margin:5px 0 0 0; font-size:20px; font-weight:700;">€{total_price:.2f}</p>
-                                        </td>
-                                    </tr>
-                                </table>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="padding:0 30px;">
-                                <h3 style="color:#111827; margin:0 0 10px 0; font-size:16px;">Order Items:</h3>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="padding:0 30px 20px 30px;">
-                                <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:8px; border:1px solid #e5e7eb; overflow:hidden;">
-                                    <tr style="background-color:#f3f4f6;">
-                                        <th style="padding:10px 15px; text-align:left; font-size:12px; color:#6b7280; text-transform:uppercase;">Medicine</th>
-                                        <th style="padding:10px 15px; text-align:center; font-size:12px; color:#6b7280; text-transform:uppercase;">Quantity</th>
-                                        <th style="padding:10px 15px; text-align:right; font-size:12px; color:#6b7280; text-transform:uppercase;">Price</th>
-                                    </tr>
-                                    <tr>
-                                        <td style="padding:12px 15px; border-bottom:1px solid #e5e7eb;">
-                                            <p style="color:#111827; margin:0; font-size:14px; font-weight:500;">{medicine_name}{size_display}</p>
-                                        </td>
-                                        <td style="padding:12px 15px; border-bottom:1px solid #e5e7eb; text-align:center;">
-                                            <p style="color:#111827; margin:0; font-size:14px;">{quantity} strip{'s' if quantity > 1 else ''}</p>
-                                        </td>
-                                        <td style="padding:12px 15px; border-bottom:1px solid #e5e7eb; text-align:right;">
-                                            <p style="color:#111827; margin:0; font-size:14px;">€{unit_price * quantity:.2f}</p>
-                                        </td>
-                                    </tr>
-                                    <tr style="background-color:#f9fafb;">
-                                        <td colspan="2" style="padding:12px 15px; text-align:right;">
-                                            <p style="color:#6b7280; margin:0; font-size:14px;">Total (incl. delivery &amp; taxes):</p>
-                                        </td>
-                                        <td style="padding:12px 15px; text-align:right;">
-                                            <p style="color:#059669; margin:0; font-size:18px; font-weight:700;">€{total_price:.2f}</p>
-                                        </td>
-                                    </tr>
-                                </table>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="padding:0 30px 20px 30px;">
-                                <div style="background-color:#ecfdf5; border-radius:8px; padding:15px; border-left:4px solid #10b981;">
-                                    <h4 style="color:#065f46; margin:0 0 8px 0; font-size:14px;">📦 Next Steps</h4>
-                                    <p style="color:#047857; margin:0 0 5px 0; font-size:13px;">✓ Our team is packing your order right now.</p>
-                                    <p style="color:#047857; margin:0 0 5px 0; font-size:13px;">✓ We'll send you a tracking link once it's dispatched.</p>
-                                    {"<p style='color:#047857; margin:0; font-size:13px;'>✓ Our pharmacist has verified your prescription — thank you for uploading!</p>" if prescription_verified else ""}
-                                </div>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="padding:0 30px 20px 30px;">
-                                <div style="background-color:#f9fafb; border-radius:8px; padding:15px; text-align:center;">
-                                    <h4 style="color:#111827; margin:0 0 10px 0; font-size:14px;">Need Help?</h4>
-                                    <p style="color:#6b7280; margin:0; font-size:13px;">Any questions? Reply to this email and we'll help right away.</p>
-                                </div>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="background-color:#f9fafb; padding:20px 30px; text-align:center; border-top:1px solid #e5e7eb;">
-                                <p style="color:#6b7280; margin:0 0 5px 0; font-size:14px;">
-                                    <strong>Warm regards,</strong><br>Team ArogyaX 🌿
-                                </p>
-                                <p style="color:#9ca3af; margin:10px 0 0 0; font-size:12px;">
-                                    support@arogyax.com | Trusted Care, Always There
-                                </p>
-                            </td>
-                        </tr>
-                    </table>
+                <td style="padding:12px 15px;border-bottom:1px solid #e5e7eb;">
+                    <p style="color:#6b7280;margin:0;font-size:11px;text-transform:uppercase;">Order ID</p>
+                    <p style="color:#111827;margin:5px 0 0;font-size:14px;font-weight:600;">#{short_id}</p>
+                </td>
+                <td style="padding:12px 15px;border-bottom:1px solid #e5e7eb;text-align:right;">
+                    <p style="color:#6b7280;margin:0;font-size:11px;text-transform:uppercase;">Order Date</p>
+                    <p style="color:#111827;margin:5px 0 0;font-size:14px;">{order_date}</p>
+                </td>
+            </tr>
+            <tr>
+                <td style="padding:12px 15px;border-bottom:1px solid #e5e7eb;">
+                    <p style="color:#6b7280;margin:0;font-size:11px;text-transform:uppercase;">Delivery Address</p>
+                    <p style="color:#111827;margin:5px 0 0;font-size:14px;">{delivery_address}</p>
+                </td>
+                <td style="padding:12px 15px;border-bottom:1px solid #e5e7eb;text-align:right;">
+                    <p style="color:#6b7280;margin:0;font-size:11px;text-transform:uppercase;">Estimated Delivery</p>
+                    <p style="color:#059669;margin:5px 0 0;font-size:14px;font-weight:600;">{estimated_delivery}</p>
+                </td>
+            </tr>
+            <tr>
+                <td style="padding:12px 15px;">
+                    <p style="color:#6b7280;margin:0;font-size:11px;text-transform:uppercase;">Payment</p>
+                    <p style="color:#111827;margin:5px 0 0;font-size:14px;">{payment_label}</p>
+                </td>
+                <td style="padding:12px 15px;text-align:right;">
+                    <p style="color:#6b7280;margin:0;font-size:11px;text-transform:uppercase;">{amount_label}</p>
+                    <p style="color:#059669;margin:5px 0 0;font-size:20px;font-weight:700;">€{total_price:.2f}</p>
                 </td>
             </tr>
         </table>
-    </body>
-    </html>
+        </td></tr>
+        <tr><td style="padding:0 30px 20px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:8px;border:1px solid #e5e7eb;overflow:hidden;">
+            <tr style="background:#f3f4f6;">
+                <th style="padding:10px 15px;text-align:left;font-size:12px;color:#6b7280;text-transform:uppercase;">Medicine</th>
+                <th style="padding:10px 15px;text-align:center;font-size:12px;color:#6b7280;text-transform:uppercase;">Qty</th>
+                <th style="padding:10px 15px;text-align:right;font-size:12px;color:#6b7280;text-transform:uppercase;">Price</th>
+            </tr>
+            <tr>
+                <td style="padding:12px 15px;border-bottom:1px solid #e5e7eb;">
+                    <p style="color:#111827;margin:0;font-size:14px;font-weight:500;">{medicine_name}{size_display}</p>
+                </td>
+                <td style="padding:12px 15px;border-bottom:1px solid #e5e7eb;text-align:center;">
+                    <p style="color:#111827;margin:0;font-size:14px;">{quantity} strip{'s' if quantity > 1 else ''}</p>
+                </td>
+                <td style="padding:12px 15px;border-bottom:1px solid #e5e7eb;text-align:right;">
+                    <p style="color:#111827;margin:0;font-size:14px;">€{unit_price * quantity:.2f}</p>
+                </td>
+            </tr>
+            <tr style="background:#f9fafb;">
+                <td colspan="2" style="padding:12px 15px;text-align:right;">
+                    <p style="color:#6b7280;margin:0;font-size:14px;">Total (incl. delivery &amp; taxes):</p>
+                </td>
+                <td style="padding:12px 15px;text-align:right;">
+                    <p style="color:#059669;margin:0;font-size:18px;font-weight:700;">€{total_price:.2f}</p>
+                </td>
+            </tr>
+        </table>
+        </td></tr>
+        <tr><td style="padding:0 30px 20px;">
+            <div style="background:#ecfdf5;border-radius:8px;padding:15px;border-left:4px solid #10b981;">
+                <h4 style="color:#065f46;margin:0 0 8px;font-size:14px;">📦 Next Steps</h4>
+                <p style="color:#047857;margin:0 0 5px;font-size:13px;">✓ Our team is packing your order right now.</p>
+                <p style="color:#047857;margin:0;font-size:13px;">✓ We'll send a tracking link once dispatched.</p>
+                {"<p style='color:#047857;margin:5px 0 0;font-size:13px;'>✓ Prescription verified — thank you!</p>" if prescription_verified else ""}
+            </div>
+        </td></tr>
+        <tr><td style="background:#f9fafb;padding:20px 30px;text-align:center;border-top:1px solid #e5e7eb;">
+            <p style="color:#6b7280;margin:0;font-size:14px;"><strong>Warm regards,</strong><br>Team ArogyaX 🌿</p>
+            <p style="color:#9ca3af;margin:10px 0 0;font-size:12px;">support@arogyax.com | Trusted Care, Always There</p>
+        </td></tr>
+    </table>
+    </td></tr></table>
+    </body></html>
     """
 
-    text = f"""
+    text_body = f"""
 Order Confirmed! #{short_id}
-
 Hi {patient_name}! Thank you for shopping with ArogyaX!
 
-ORDER DETAILS:
-Order ID: #{short_id}
-Order Date: {order_date}
-Delivery Address: {delivery_address}
-Estimated Delivery: {estimated_delivery}
-Payment: {payment_label}
-Amount: €{total_price:.2f}
+Order ID: #{short_id} | Date: {order_date}
+Delivery: {estimated_delivery}
+Payment: {payment_label} | Total: €{total_price:.2f}
 
-ORDER ITEMS:
-{medicine_name}{size_display}
-Quantity: {quantity} strip{'s' if quantity > 1 else ''}
-Price: €{unit_price * quantity:.2f}
-Total: €{total_price:.2f}
+{medicine_name}{size_display} x{quantity} — €{unit_price * quantity:.2f}
 
-Our team is packing your order right now.
-{"Our pharmacist has verified your prescription!" if prescription_verified else ""}
-
-Warm regards,
-Team ArogyaX 🌿
+Warm regards, Team ArogyaX 🌿
     """
 
-    # Fire-and-forget — API returns instantly, email arrives seconds later
-    _send_email_bg(to_email, subject, html, text)
+    _send_email_bg(to_email, subject, html, text_body)
     return {"success": True, "queued": True}
 
 
@@ -400,18 +360,16 @@ def _check_chronic_med_refills(patient_id: str, alert_days: int = 7) -> list[dic
     history = _get_patient_history(patient_id)
     if not history:
         return []
-
     seen = {}
     for row in history:
         med = (row.get("medicine_name") or row.get("name") or "").strip()
         if med and med not in seen:
             seen[med] = row
-
     due_meds = []
     for med, row in seen.items():
-        dosage    = row.get("dosage_frequency") or "as directed"
-        qty_bought = row.get("quantity", 1)
-        supply_days = _get_supply_days(dosage)
+        dosage        = row.get("dosage_frequency") or "as directed"
+        qty_bought    = row.get("quantity", 1)
+        supply_days   = _get_supply_days(dosage)
         last_purchase = row.get("purchase_date")
         if not last_purchase:
             continue
@@ -421,18 +379,16 @@ def _check_chronic_med_refills(patient_id: str, alert_days: int = 7) -> list[dic
             days_left = supply_days - days_ago
         except Exception:
             continue
-
         if days_left <= alert_days:
             due_meds.append({
-                "medicine":       med,
-                "days_until":     days_left,
-                "due_date":       (datetime.now() + timedelta(days=days_left)).strftime("%d %B %Y"),
-                "dosage":         dosage,
-                "last_purchase":  last_purchase[:10],
+                "medicine":        med,
+                "days_until":      days_left,
+                "due_date":        (datetime.now() + timedelta(days=days_left)).strftime("%d %B %Y"),
+                "dosage":          dosage,
+                "last_purchase":   last_purchase[:10],
                 "quantity_bought": qty_bought,
-                "current_stock":  _get_product_stock(med),
+                "current_stock":   _get_product_stock(med),
             })
-
     return due_meds
 
 
@@ -468,145 +424,102 @@ def send_proactive_refill_email(
 
         meds_html += f"""
         <tr>
-            <td style="padding:15px; border-bottom:1px solid {border};">
-                <p style="margin:0; color:#111827; font-weight:600; font-size:15px;">{emoji} {med_name}</p>
-                <p style="margin:8px 0 0 0; color:#6b7280; font-size:12px;">Dosage: {dosage}</p>
+            <td style="padding:15px;border-bottom:1px solid {border};">
+                <p style="margin:0;color:#111827;font-weight:600;font-size:15px;">{emoji} {med_name}</p>
+                <p style="margin:8px 0 0;color:#6b7280;font-size:12px;">Dosage: {dosage}</p>
             </td>
-            <td style="padding:15px; border-bottom:1px solid {border}; text-align:right;">
-                <p style="margin:0; color:{uc}; font-weight:700; font-size:14px;">{urgency}</p>
-                <p style="margin:5px 0 0 0; color:#6b7280; font-size:12px;">Due: {due_date}</p>
+            <td style="padding:15px;border-bottom:1px solid {border};text-align:right;">
+                <p style="margin:0;color:{uc};font-weight:700;font-size:14px;">{urgency}</p>
+                <p style="margin:5px 0 0;color:#6b7280;font-size:12px;">Due: {due_date}</p>
             </td>
         </tr>
         <tr>
-            <td colspan="2" style="padding:10px 15px 15px 15px; border-bottom:1px solid {border}; background-color:{bg};">
+            <td colspan="2" style="padding:10px 15px 15px;border-bottom:1px solid {border};background:{bg};">
                 <table width="100%" cellpadding="0" cellspacing="0"><tr>
                     <td style="padding:0 10px 0 0;">
-                        <p style="margin:0; color:#6b7280; font-size:11px;">Last Purchase</p>
-                        <p style="margin:3px 0 0 0; color:#111827; font-size:13px; font-weight:500;">{last_purchase}</p>
+                        <p style="margin:0;color:#6b7280;font-size:11px;">Last Purchase</p>
+                        <p style="margin:3px 0 0;color:#111827;font-size:13px;font-weight:500;">{last_purchase}</p>
                     </td>
                     <td style="padding:0 10px 0 0;">
-                        <p style="margin:0; color:#6b7280; font-size:11px;">Qty Bought</p>
-                        <p style="margin:3px 0 0 0; color:#111827; font-size:13px; font-weight:500;">{qty_bought} tablets</p>
+                        <p style="margin:0;color:#6b7280;font-size:11px;">Qty Bought</p>
+                        <p style="margin:3px 0 0;color:#111827;font-size:13px;font-weight:500;">{qty_bought} tablets</p>
                     </td>
                     <td>
-                        <p style="margin:0; color:#6b7280; font-size:11px;">Current Stock</p>
-                        <p style="margin:3px 0 0 0; color:#059669; font-size:13px; font-weight:500;">{stock_display}</p>
+                        <p style="margin:0;color:#6b7280;font-size:11px;">Current Stock</p>
+                        <p style="margin:3px 0 0;color:#059669;font-size:13px;font-weight:500;">{stock_display}</p>
                     </td>
                 </tr></table>
             </td>
-        </tr>
-        """
-        meds_text += f"• {med_name}\n  Last purchase: {last_purchase} | Qty: {qty_bought} | {urgency} (Due: {due_date}) | Stock: {stock_display}\n\n"
+        </tr>"""
+        meds_text += f"• {med_name} | {urgency} (Due: {due_date}) | Last: {last_purchase}\n"
 
     subject = f"💊 Refill Reminder — {len(due_meds)} medication{'s' if len(due_meds) > 1 else ''} due | ArogyaX"
 
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
-    <body style="margin:0; padding:0; background-color:#f5f5f5; font-family:'Segoe UI', Arial, sans-serif;">
-        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f5f5; padding:20px;">
-            <tr><td align="center">
-                <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 4px 12px rgba(0,0,0,0.1);">
-                    <tr>
-                        <td style="background:linear-gradient(135deg,#0d9488 0%,#14b8a6 100%); padding:30px; text-align:center;">
-                            <h1 style="color:#ffffff; margin:0; font-size:28px; font-weight:600;">🌿 ArogyaX</h1>
-                            <p style="color:#ccfbf1; margin:5px 0 0 0; font-size:14px;">Your Trusted Pharmacy Partner</p>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="padding:30px 30px 10px 30px; text-align:center;">
-                            <span style="font-size:50px;">💊</span>
-                            <h2 style="color:#065f46; margin:15px 0 5px 0; font-size:24px;">Refill Reminder</h2>
-                            <p style="color:#6b7280; margin:0; font-size:14px;">Hi {patient_name}, your medications may be running low soon!</p>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="padding:20px 30px;">
-                            <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:8px; border:1px solid #e5e7eb; overflow:hidden;">
-                                <tr style="background-color:#f3f4f6;">
-                                    <th style="padding:12px 15px; text-align:left; font-size:12px; color:#6b7280; text-transform:uppercase;">Medication</th>
-                                    <th style="padding:12px 15px; text-align:right; font-size:12px; color:#6b7280; text-transform:uppercase;">Status</th>
-                                </tr>
-                                {meds_html}
-                            </table>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="padding:0 30px 20px 30px; text-align:center;">
-                            <p style="color:#6b7280; margin:0 0 10px 0; font-size:14px;">Reply <strong>YES</strong> or <strong>REFILL</strong> to this email to reorder, or call/WhatsApp us at {pharmacy_phone}.</p>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="padding:0 30px 20px 30px;">
-                            <div style="background-color:#fefce8; border-radius:8px; padding:15px; border-left:4px solid #facc15;">
-                                <p style="color:#854d0e; margin:0; font-size:12px;"><strong>⚠️ Safety Disclaimer:</strong> Always consult your doctor before continuing or changing any medication.</p>
-                            </div>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="background-color:#f9fafb; padding:20px 30px; text-align:center; border-top:1px solid #e5e7eb;">
-                            <p style="color:#9ca3af; margin:0; font-size:12px;">— ArogyaX 🌿 | support@arogyax.com | Trusted Care, Always There</p>
-                        </td>
-                    </tr>
-                </table>
-            </td></tr>
+    html = f"""<!DOCTYPE html>
+    <html><head><meta charset="utf-8"></head>
+    <body style="margin:0;padding:0;background:#f5f5f5;font-family:'Segoe UI',Arial,sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:20px;">
+    <tr><td align="center">
+    <table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.1);">
+        <tr><td style="background:linear-gradient(135deg,#0d9488,#14b8a6);padding:30px;text-align:center;">
+            <h1 style="color:#fff;margin:0;font-size:28px;">🌿 ArogyaX</h1>
+        </td></tr>
+        <tr><td style="padding:30px 30px 10px;text-align:center;">
+            <h2 style="color:#065f46;margin:0 0 5px;font-size:24px;">💊 Refill Reminder</h2>
+            <p style="color:#6b7280;margin:0;font-size:14px;">Hi {patient_name}, your medications may be running low!</p>
+        </td></tr>
+        <tr><td style="padding:20px 30px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:8px;border:1px solid #e5e7eb;overflow:hidden;">
+            <tr style="background:#f3f4f6;">
+                <th style="padding:12px 15px;text-align:left;font-size:12px;color:#6b7280;text-transform:uppercase;">Medication</th>
+                <th style="padding:12px 15px;text-align:right;font-size:12px;color:#6b7280;text-transform:uppercase;">Status</th>
+            </tr>
+            {meds_html}
         </table>
-    </body>
-    </html>
-    """
+        </td></tr>
+        <tr><td style="padding:0 30px 20px;text-align:center;">
+            <p style="color:#6b7280;margin:0;font-size:14px;">Reply <strong>YES</strong> or <strong>REFILL</strong> to reorder.</p>
+        </td></tr>
+        <tr><td style="padding:0 30px 20px;">
+            <div style="background:#fefce8;border-radius:8px;padding:15px;border-left:4px solid #facc15;">
+                <p style="color:#854d0e;margin:0;font-size:12px;"><strong>⚠️</strong> Always consult your doctor before continuing any medication.</p>
+            </div>
+        </td></tr>
+        <tr><td style="background:#f9fafb;padding:20px 30px;text-align:center;border-top:1px solid #e5e7eb;">
+            <p style="color:#9ca3af;margin:0;font-size:12px;">— ArogyaX 🌿 | support@arogyax.com</p>
+        </td></tr>
+    </table>
+    </td></tr></table>
+    </body></html>"""
 
-    text = f"""
-Refill Reminder — ArogyaX
-
-Hi {patient_name}! Your medications may be running low:
-
-{meds_text}
-Reply YES or REFILL to reorder, or call {pharmacy_phone}.
-
-⚠️ Always consult your doctor before continuing any medication.
-
-— ArogyaX 🌿 | support@arogyax.com
-    """
-
-    # Fire-and-forget — doesn't block the agent pipeline
-    _send_email_bg(to_email, subject, html, text)
+    _send_email_bg(to_email, subject, html, meds_text)
     return {"success": True, "queued": True}
 
 
 def _send_proactive_refill_alert(patient_id: str, due_meds: list[dict] = None) -> bool:
     email, name, phone = _get_patient_contact(patient_id)
     if not email:
-        print(f"[ProactiveRefill] No email found for patient {patient_id}")
         return False
-
     if due_meds is None:
         due_meds = _check_chronic_med_refills(patient_id)
-
     if not due_meds:
-        print(f"[ProactiveRefill] No medications due for {patient_id}")
         return False
-
     result = send_proactive_refill_email(to_email=email, patient_name=name, due_meds=due_meds)
-
     try:
         supabase.table("decision_ledger").insert({
-            "agent_name":     "ProactiveRefill",
-            "action":         "PROACTIVE_REFILL_EMAIL_SENT",
-            "reason":         f"Sent refill email for {len(due_meds)} med(s) to {email}",
-            "input_payload":  {"patient_id": patient_id, "medications": [m.get("medicine") for m in due_meds]},
+            "agent_name":    "ProactiveRefill",
+            "action":        "PROACTIVE_REFILL_EMAIL_SENT",
+            "reason":        f"Sent refill email for {len(due_meds)} med(s) to {email}",
+            "input_payload": {"patient_id": patient_id, "medications": [m.get("medicine") for m in due_meds]},
             "output_payload": result,
         }).execute()
     except Exception as e:
-        print(f"[ProactiveRefill] Failed to log to decision_ledger: {e}")
-
+        print(f"[ProactiveRefill] Failed to log: {e}")
     return result.get("success", False)
 
 
 def run_proactive_refill_scan(alert_days: int = 7) -> dict:
-    """Scan all patients and send proactive refill emails. Called by daily scheduler."""
-    print(f"[ProactiveRefill] Running batch scan with {alert_days} day window...")
-
+    print(f"[ProactiveRefill] Running batch scan ({alert_days}d window)...")
     users_resp_data = []
     try:
         orders_resp = supabase.table("orders").select("patient_id, first_name, last_name, email").execute()
@@ -621,7 +534,7 @@ def run_proactive_refill_scan(alert_days: int = 7) -> dict:
         except Exception:
             pass
     except Exception as e:
-        print(f"[ProactiveRefill] Failed to fetch orders: {e}")
+        print(f"[ProactiveRefill] Failed to fetch: {e}")
         try:
             users_resp = supabase.table("users").select("id, patient_id, email").execute()
             users_resp_data = users_resp.data or []
@@ -630,7 +543,6 @@ def run_proactive_refill_scan(alert_days: int = 7) -> dict:
 
     sent_count = failed_count = 0
     errors = []
-
     for user in users_resp_data:
         patient_id = user.get("patient_id")
         if not patient_id:
@@ -648,13 +560,12 @@ def run_proactive_refill_scan(alert_days: int = 7) -> dict:
     summary = {"sent": sent_count, "failed": failed_count, "total_checked": len(users_resp_data)}
     if errors:
         summary["errors"] = errors
-
-    print(f"[ProactiveRefill] Batch scan complete. Sent: {sent_count}, Failed: {failed_count}")
+    print(f"[ProactiveRefill] Done. Sent: {sent_count}, Failed: {failed_count}")
     return summary
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LEGACY REFILL REMINDER (kept for compatibility)
+# LEGACY REFILL REMINDER
 # ══════════════════════════════════════════════════════════════════════════════
 
 def send_refill_reminder_email(
@@ -672,43 +583,31 @@ def send_refill_reminder_email(
         urgency, emoji, color = f"Due in {days_left} days", "💊", "#0d9488"
 
     subject = f"{emoji} Refill Reminder — {medicine_name} | ArogyaX"
-
-    html = f"""
-    <!DOCTYPE html>
+    html = f"""<!DOCTYPE html>
     <html><head><meta charset="utf-8"></head>
-    <body style="margin:0; padding:0; background-color:#f5f5f5; font-family:'Segoe UI', Arial, sans-serif;">
-        <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f5f5; padding:20px;">
-            <tr><td align="center">
-                <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:12px; overflow:hidden;">
-                    <tr>
-                        <td style="background:linear-gradient(135deg,#0d9488 0%,#14b8a6 100%); padding:30px; text-align:center;">
-                            <h1 style="color:#ffffff; margin:0; font-size:28px;">🌿 ArogyaX</h1>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="padding:30px; text-align:center;">
-                            <span style="font-size:50px;">{emoji}</span>
-                            <h2 style="color:#92400e; margin:15px 0 5px 0;">Refill Reminder</h2>
-                            <p style="color:#6b7280;">Hi {patient_name}, it's time to refill your medicine!</p>
-                            <div style="background-color:#fefbeb; border-radius:8px; padding:20px; border:1px solid #fcd34d; margin-top:20px;">
-                                <p style="color:#92400e; margin:0; font-size:16px; font-weight:600;">{medicine_name}</p>
-                                <p style="color:{color}; margin:10px 0 0 0; font-size:18px; font-weight:700;">{urgency}</p>
-                                <p style="color:#6b7280; margin:5px 0 0 0; font-size:12px;">Due: {due_date}</p>
-                            </div>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="background-color:#f9fafb; padding:20px 30px; text-align:center; border-top:1px solid #e5e7eb;">
-                            <p style="color:#9ca3af; margin:0; font-size:12px;">— ArogyaX 🌿 | support@arogyax.com</p>
-                        </td>
-                    </tr>
-                </table>
-            </td></tr>
-        </table>
-    </body></html>
-    """
-
-    text = f"Refill Reminder\n\nHi {patient_name}!\n\n{emoji} {medicine_name}: {urgency}\nDue: {due_date}\n\n— ArogyaX 🌿"
-
+    <body style="margin:0;padding:0;background:#f5f5f5;font-family:'Segoe UI',Arial,sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:20px;">
+    <tr><td align="center">
+    <table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:12px;overflow:hidden;">
+        <tr><td style="background:linear-gradient(135deg,#0d9488,#14b8a6);padding:30px;text-align:center;">
+            <h1 style="color:#fff;margin:0;font-size:28px;">🌿 ArogyaX</h1>
+        </td></tr>
+        <tr><td style="padding:30px;text-align:center;">
+            <span style="font-size:50px;">{emoji}</span>
+            <h2 style="color:#92400e;margin:15px 0 5px;">Refill Reminder</h2>
+            <p style="color:#6b7280;">Hi {patient_name}, it's time to refill!</p>
+            <div style="background:#fefbeb;border-radius:8px;padding:20px;border:1px solid #fcd34d;margin-top:20px;">
+                <p style="color:#92400e;margin:0;font-size:16px;font-weight:600;">{medicine_name}</p>
+                <p style="color:{color};margin:10px 0 0;font-size:18px;font-weight:700;">{urgency}</p>
+                <p style="color:#6b7280;margin:5px 0 0;font-size:12px;">Due: {due_date}</p>
+            </div>
+        </td></tr>
+        <tr><td style="background:#f9fafb;padding:20px 30px;text-align:center;border-top:1px solid #e5e7eb;">
+            <p style="color:#9ca3af;margin:0;font-size:12px;">— ArogyaX 🌿 | support@arogyax.com</p>
+        </td></tr>
+    </table>
+    </td></tr></table>
+    </body></html>"""
+    text = f"Refill Reminder\n\nHi {patient_name}!\n{emoji} {medicine_name}: {urgency}\nDue: {due_date}\n\n— ArogyaX 🌿"
     _send_email_bg(to_email, subject, html, text)
     return {"success": True, "queued": True}
