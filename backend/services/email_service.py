@@ -58,27 +58,21 @@ def _get_patient_contact(patient_id: str) -> tuple[str, str, str]:
     return "", "Customer", settings.USER_PHONE_FALLBACK
 
 
-# ── Core send function — SMTP ─────────────────────────────────────────────────
+# ── Core send function — tries SendGrid HTTP first, falls back to SMTP 2525 ───
 
 def _send_email(to: str, subject: str, html: str, text: str = None) -> dict:
     """
-    Send email via Gmail SMTP using an App Password.
+    Send email using SendGrid HTTP API (port 443).
+    Railway blocks port 587 but allows port 443 — so we use HTTP API directly.
     Never raises. Falls back to mock/log if credentials are missing.
-    Returns {"success": bool, "error": str}
-
-    Required .env vars:
-      EMAIL_FROM=arogyax213@gmail.com
-      GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx   (16-char Google App Password)
-      EMAIL_FROM_NAME=ArogyaX
     """
-    # ── Resolve credentials ────────────────────────────────────────────────
-    smtp_user     = getattr(settings, "EMAIL_FROM", "") or ""
-    smtp_password = getattr(settings, "GMAIL_APP_PASSWORD", "") or ""
+    api_key = getattr(settings, "SENDGRID_API_KEY", "") or ""
+    gmail_pass = getattr(settings, "GMAIL_APP_PASSWORD", "") or ""
 
     # ── No credentials → mock log ──────────────────────────────────────────
-    if not smtp_password:
+    if not api_key and not gmail_pass:
         print(f"\n{'─'*50}")
-        print(f"[Email MOCK — GMAIL_APP_PASSWORD not set]")
+        print(f"[Email MOCK — no credentials set]")
         print(f"To: {to} | Subject: {subject}")
         print(f"{'─'*50}\n")
         return {"success": True, "mock": True}
@@ -86,37 +80,71 @@ def _send_email(to: str, subject: str, html: str, text: str = None) -> dict:
     if not to:
         return {"success": False, "error": "No recipient email provided"}
 
-    # ── Build MIME message ─────────────────────────────────────────────────
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"]    = f"{settings.EMAIL_FROM_NAME} <{smtp_user}>"
-    msg["To"]      = to
+    # ── Try SendGrid HTTP API first (port 443 — works everywhere) ──────────
+    if api_key:
+        try:
+            import urllib.request
+            import json as _json
 
-    if text:
-        msg.attach(MIMEText(text, "plain", "utf-8"))
-    msg.attach(MIMEText(html, "html", "utf-8"))
+            payload = _json.dumps({
+                "personalizations": [{"to": [{"email": to}]}],
+                "from": {
+                    "email": settings.EMAIL_FROM,
+                    "name":  settings.EMAIL_FROM_NAME,
+                },
+                "subject": subject,
+                "content": [
+                    {"type": "text/plain", "value": text or ""},
+                    {"type": "text/html",  "value": html},
+                ],
+            }).encode("utf-8")
 
-    # ── Send via Gmail SMTP ────────────────────────────────────────────────
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(smtp_user, smtp_password.replace(" ", ""))  # strip spaces if any
-            server.sendmail(smtp_user, to, msg.as_string())
+            req = urllib.request.Request(
+                "https://api.sendgrid.com/v3/mail/send",
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type":  "application/json",
+                },
+                method="POST",
+            )
 
-        print(f"[Email] ✅ Sent to {to} | Subject: {subject}")
-        return {"success": True}
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                status = resp.status
 
-    except smtplib.SMTPAuthenticationError:
-        err = "Gmail auth failed — check EMAIL_FROM and GMAIL_APP_PASSWORD in .env"
-        print(f"[Email] ❌ {err}")
-        return {"success": False, "error": err}
+            print(f"[Email] ✅ Sent via SendGrid HTTP to {to} | Status: {status}")
+            return {"success": True, "status_code": status}
 
-    except smtplib.SMTPException as e:
-        err = f"SMTP error: {e}"
-        print(f"[Email] ❌ Failed to send to {to}: {err}")
-        return {"success": False, "error": err}
+        except Exception as e:
+            print(f"[Email] ⚠️ SendGrid HTTP failed: {e} — trying SMTP fallback")
+
+    # ── Fallback: Gmail SMTP port 587 (works locally, blocked on Railway) ──
+    if gmail_pass:
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"]    = f"{settings.EMAIL_FROM_NAME} <{settings.EMAIL_FROM}>"
+            msg["To"]      = to
+            if text:
+                msg.attach(MIMEText(text, "plain", "utf-8"))
+            msg.attach(MIMEText(html, "html", "utf-8"))
+
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(settings.EMAIL_FROM, gmail_pass.replace(" ", ""))
+                server.sendmail(settings.EMAIL_FROM, to, msg.as_string())
+
+            print(f"[Email] ✅ Sent via Gmail SMTP to {to}")
+            return {"success": True}
+
+        except Exception as e:
+            err = str(e)
+            print(f"[Email] ❌ Gmail SMTP also failed: {err}")
+            return {"success": False, "error": err}
+
+    return {"success": False, "error": "No working email method available"}
 
     except Exception as e:
         err = str(e)
