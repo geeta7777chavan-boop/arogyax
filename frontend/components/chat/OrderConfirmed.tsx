@@ -2,7 +2,7 @@
 // components/chat/OrderConfirmed.tsx
 // Shown after user clicks "Place Order" — full confirmation card
 
-import { CheckCircle, Package } from "lucide-react";
+import { CheckCircle, Package, ExternalLink, Mail } from "lucide-react";
 import type { OrderResponse } from "@/types";
 import { format, addDays } from "date-fns";
 
@@ -25,6 +25,7 @@ export default function OrderConfirmed({ response, paymentMethod }: Props) {
 
   return (
     <div className="w-full max-w-sm rounded-2xl border border-brand-400/20 bg-brand-400/5 overflow-hidden shadow-lg">
+
       {/* Header */}
       <div className="px-4 py-4 flex items-center gap-3 border-b border-brand-400/10">
         <div className="w-10 h-10 rounded-full bg-brand-400/15 border border-brand-400/30 flex items-center justify-center shrink-0">
@@ -36,6 +37,16 @@ export default function OrderConfirmed({ response, paymentMethod }: Props) {
             <p className="text-xs text-brand-400 font-mono">#{shortId}</p>
           )}
         </div>
+        {response.langfuse_trace_id && (
+          <a
+            href="https://cloud.langfuse.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-auto flex items-center gap-1 text-[10px] text-ink-muted hover:text-brand-400 transition-colors font-mono"
+          >
+            <ExternalLink size={10} /> trace
+          </a>
+        )}
       </div>
 
       {/* Item row */}
@@ -46,7 +57,7 @@ export default function OrderConfirmed({ response, paymentMethod }: Props) {
               {medicine}
             </p>
             <p className="text-sm text-ink-muted font-mono mt-1.5">
-              {dosage && `${dosage} • `}Quantity: {qty}
+              {dosage && `${dosage} · `}Quantity: {qty}
             </p>
           </div>
           {totalPrice !== null && (
@@ -66,12 +77,8 @@ export default function OrderConfirmed({ response, paymentMethod }: Props) {
       </div>
 
       {/* Status badges */}
-      <div className="px-4 pb-4 flex flex-wrap gap-2">
-        {[
-          "Inventory Updated",
-          "Warehouse Notified",
-          "Confirmation Sent",
-        ].map(label => (
+      <div className="px-4 pb-3 flex flex-wrap gap-2">
+        {["Inventory Updated", "Warehouse Notified", "Confirmation Sent"].map(label => (
           <span
             key={label}
             className="flex items-center gap-1 text-[10px] font-mono text-brand-400 bg-brand-400/10 border border-brand-400/20 rounded-full px-2.5 py-1"
@@ -87,6 +94,26 @@ export default function OrderConfirmed({ response, paymentMethod }: Props) {
         )}
       </div>
 
+      {/* Email notification banner */}
+      <div className="mx-3 mb-3 rounded-xl border border-brand-400/15 px-4 py-3 flex items-start gap-3"
+           style={{ background: "rgba(45,212,160,0.06)" }}>
+        <div className="w-7 h-7 rounded-full bg-brand-400/15 flex items-center justify-center shrink-0 mt-0.5">
+          <Mail size={13} className="text-brand-400" />
+        </div>
+        <div>
+          <p className="text-xs font-semibold text-ink-primary mb-1">
+            Confirmation email on its way 📬
+          </p>
+          <p className="text-[11px] text-ink-muted leading-relaxed">
+            We've sent your order details to your registered email address.
+            If it doesn't arrive within a few minutes, please check your{" "}
+            <span className="text-brand-400 font-medium">Spam</span> or{" "}
+            <span className="text-brand-400 font-medium">Promotions</span> folder —
+            it may have landed there.
+          </p>
+        </div>
+      </div>
+
       {/* Payment */}
       <div className="px-4 pb-4">
         <p className="text-[10px] text-ink-muted font-mono">
@@ -95,6 +122,7 @@ export default function OrderConfirmed({ response, paymentMethod }: Props) {
             : "💳 Online payment confirmed"}
         </p>
       </div>
+
     </div>
   );
 }
