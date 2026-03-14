@@ -58,33 +58,21 @@ def _get_patient_contact(patient_id: str) -> tuple[str, str, str]:
     return "", "Customer", settings.USER_PHONE_FALLBACK
 
 
-# ── Core send function — Resend API (port 443, works on Railway) ─────────────
+# ── Core send function — Gmail SMTP SSL port 465 ─────────────────────────────
 
 def _send_email(to: str, subject: str, html: str, text: str = None) -> dict:
     """
-    Send email using Resend API (port 443 HTTPS).
-    Works on Railway, Render, and all cloud platforms.
-    Falls back to Gmail SMTP for local development.
-    Never raises.
-
-    Railway env vars needed:
-      RESEND_API_KEY=re_xxxxxxxxxxxxxxxx
-      EMAIL_FROM=onboarding@resend.dev  (or your verified domain)
-      EMAIL_FROM_NAME=ArogyaX
-
-    Local .env:
-      GMAIL_APP_PASSWORD=xxxx  (used as fallback when RESEND_API_KEY not set)
+    Send email via Gmail SMTP SSL (port 465).
+    Port 465 works on Railway/Render unlike port 587 which is blocked.
+    Never raises. Returns {"success": bool}
     """
-    import urllib.request
-    import json as _json
-
-    resend_key = getattr(settings, "RESEND_API_KEY", "") or ""
-    gmail_pass  = getattr(settings, "GMAIL_APP_PASSWORD", "") or ""
+    gmail_user = getattr(settings, "EMAIL_FROM", "") or ""
+    gmail_pass = getattr(settings, "GMAIL_APP_PASSWORD", "") or ""
 
     # ── No credentials → mock log ──────────────────────────────────────────
-    if not resend_key and not gmail_pass:
+    if not gmail_pass:
         print(f"\n{'─'*50}")
-        print(f"[Email MOCK — no credentials set]")
+        print(f"[Email MOCK — GMAIL_APP_PASSWORD not set]")
         print(f"To: {to} | Subject: {subject}")
         print(f"{'─'*50}\n")
         return {"success": True, "mock": True}
@@ -92,64 +80,40 @@ def _send_email(to: str, subject: str, html: str, text: str = None) -> dict:
     if not to:
         return {"success": False, "error": "No recipient email provided"}
 
-    # ── Try Resend API first (works on Railway) ────────────────────────────
-    if resend_key:
-        try:
-            payload = _json.dumps({
-                "from":    f"{settings.EMAIL_FROM_NAME} <{settings.EMAIL_FROM}>",
-                "to":      [to],
-                "subject": subject,
-                "html":    html,
-                "text":    text or "",
-            }).encode("utf-8")
+    # ── Build MIME message ─────────────────────────────────────────────────
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = f"{settings.EMAIL_FROM_NAME} <{gmail_user}>"
+    msg["To"]      = to
+    if text:
+        msg.attach(MIMEText(text, "plain", "utf-8"))
+    msg.attach(MIMEText(html, "html", "utf-8"))
 
-            req = urllib.request.Request(
-                "https://api.resend.com/emails",
-                data=payload,
-                headers={
-                    "Authorization": f"Bearer {resend_key}",
-                    "Content-Type":  "application/json",
-                },
-                method="POST",
-            )
+    # ── Try port 465 (SSL) first — works on Railway ────────────────────────
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
+            server.ehlo()
+            server.login(gmail_user, gmail_pass.replace(" ", ""))
+            server.sendmail(gmail_user, to, msg.as_string())
+        print(f"[Email] ✅ Sent via Gmail SSL (465) to {to}")
+        return {"success": True}
+    except Exception as e:
+        print(f"[Email] ⚠️ Port 465 failed: {e} — trying port 587")
 
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                status = resp.status
-                body   = _json.loads(resp.read().decode())
-
-            print(f"[Email] ✅ Sent via Resend to {to} | id: {body.get('id')}")
-            return {"success": True, "id": body.get("id")}
-
-        except Exception as e:
-            print(f"[Email] ⚠️ Resend failed: {e} — trying Gmail SMTP fallback")
-
-    # ── Fallback: Gmail SMTP (works locally, may be blocked on Railway) ────
-    if gmail_pass:
-        try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = subject
-            msg["From"]    = f"{settings.EMAIL_FROM_NAME} <{settings.EMAIL_FROM}>"
-            msg["To"]      = to
-            if text:
-                msg.attach(MIMEText(text, "plain", "utf-8"))
-            msg.attach(MIMEText(html, "html", "utf-8"))
-
-            with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
-                server.ehlo()
-                server.starttls()
-                server.ehlo()
-                server.login(settings.EMAIL_FROM, gmail_pass.replace(" ", ""))
-                server.sendmail(settings.EMAIL_FROM, to, msg.as_string())
-
-            print(f"[Email] ✅ Sent via Gmail SMTP to {to}")
-            return {"success": True}
-
-        except Exception as e:
-            err = str(e)
-            print(f"[Email] ❌ Gmail SMTP also failed: {err}")
-            return {"success": False, "error": err}
-
-    return {"success": False, "error": "No working email method available"}
+    # ── Fallback: port 587 (TLS) — works locally ──────────────────────────
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(gmail_user, gmail_pass.replace(" ", ""))
+            server.sendmail(gmail_user, to, msg.as_string())
+        print(f"[Email] ✅ Sent via Gmail TLS (587) to {to}")
+        return {"success": True}
+    except Exception as e:
+        err = str(e)
+        print(f"[Email] ❌ Failed to send to {to}: {err}")
+        return {"success": False, "error": err}
 
 
 # ── Fire-and-forget wrapper — doesn't block the agent pipeline ───────────────
