@@ -57,11 +57,11 @@ function RefillBanner({
   const [expanded, setExpanded] = useState(true);
 
   const isUrgent = urgency === "urgent";
-  const bg     = isUrgent ? "bg-red-950/40 border-red-500/30"  : "bg-amber-950/40 border-amber-500/30";
-  const icon   = isUrgent ? "🔴" : "🟡";
-  const title  = isUrgent ? "Medicines running low!" : "Upcoming refills";
-  const badge  = isUrgent ? "bg-red-500/20 text-red-300" : "bg-amber-500/20 text-amber-300";
-  const btn    = isUrgent ? "bg-red-500 hover:bg-red-600" : "bg-amber-500 hover:bg-amber-600";
+  const bg    = isUrgent ? "bg-red-950/40 border-red-500/30"  : "bg-amber-950/40 border-amber-500/30";
+  const icon  = isUrgent ? "🔴" : "🟡";
+  const title = isUrgent ? "Medicines running low!" : "Upcoming refills";
+  const badge = isUrgent ? "bg-red-500/20 text-red-300" : "bg-amber-500/20 text-amber-300";
+  const btn   = isUrgent ? "bg-red-500 hover:bg-red-600" : "bg-amber-500 hover:bg-amber-600";
 
   function shortName(n: string) { return n.split(",")[0].trim(); }
   function daysLabel(d: number) {
@@ -72,7 +72,6 @@ function RefillBanner({
 
   return (
     <div className={`mx-3 mt-2 mb-1 rounded-xl border overflow-hidden ${bg}`}>
-      {/* Header */}
       <div
         className="flex items-center justify-between px-4 py-2.5 cursor-pointer"
         onClick={() => setExpanded(!expanded)}
@@ -95,7 +94,6 @@ function RefillBanner({
         </div>
       </div>
 
-      {/* Alert rows */}
       {expanded && (
         <div className="border-t border-white/10">
           {alerts.map((alert, i) => (
@@ -131,91 +129,64 @@ interface ChatWindowProps {
 }
 
 export default function ChatWindow({ patientId, patientEmail, patientName }: ChatWindowProps) {
-  const { messages, loading, error, sendMessage, sendVoice, clearChat, confirmOrder, addMessage } =
+  const { messages, loading, sendMessage, sendVoice, clearChat, confirmOrder, addMessage } =
     useChat(patientId, patientEmail, patientName);
 
-  const [input,           setInput]           = useState("");
-  const [rxUploaded,      setRxUploaded]      = useState(false);
-  const [rxPrescId,       setRxPrescId]       = useState<string | null>(null);
-  const [rxMedicines,     setRxMedicines]     = useState<RxMedicine[]>([]);
-  const [paymentMethod,   setPaymentMethod]   = useState<PaymentMethod>("cash_on_delivery");
-  const [activeTab,       setActiveTab]       = useState<PanelTab>("chat");
-  const [showRxUpload,    setShowRxUpload]    = useState(false);
-  const [historyRefresh,  setHistoryRefresh]  = useState(0);
-
-  // Refill state
-  const [refillAlerts,    setRefillAlerts]    = useState<RefillAlert[]>([]);
-  const [refillUrgency,   setRefillUrgency]   = useState<"urgent" | "soon">("soon");
-  const [showRefillBanner,setShowRefillBanner] = useState(false);
-  const [refillChecked,   setRefillChecked]   = useState(false);
-  // Track if we have pending proactive refill suggestions from the greeting
+  const [input,            setInput]            = useState("");
+  const [rxUploaded,       setRxUploaded]       = useState(false);
+  const [rxPrescId,        setRxPrescId]        = useState<string | null>(null);
+  const [rxMedicines,      setRxMedicines]      = useState<RxMedicine[]>([]);
+  const [paymentMethod,    setPaymentMethod]    = useState<PaymentMethod>("cash_on_delivery");
+  const [activeTab,        setActiveTab]        = useState<PanelTab>("chat");
+  const [showRxUpload,     setShowRxUpload]     = useState(false);
+  const [historyRefresh,   setHistoryRefresh]   = useState(0);
+  const [refillAlerts,     setRefillAlerts]     = useState<RefillAlert[]>([]);
+  const [refillUrgency,    setRefillUrgency]    = useState<"urgent" | "soon">("soon");
+  const [showRefillBanner, setShowRefillBanner] = useState(false);
+  const [refillChecked,    setRefillChecked]    = useState(false);
   const [pendingRefillSuggestions, setPendingRefillSuggestions] = useState<RefillAlert[]>([]);
 
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const bottomRef    = useRef<HTMLDivElement>(null);
+  const voiceResetRef = useRef<(() => void) | null>(null);
 
-  // ── Proactive refill check on session open ──────────────────────────────
+  // ── Proactive refill check on session open ────────────────────────────────
   useEffect(() => {
-    // Only run once, only when chat is empty
     if (refillChecked) return;
     setRefillChecked(true);
-
     let isMounted = true;
 
     fetch(`${API_BASE}/refill-alerts/check/${patientId}`)
       .then(r => r.json())
       .then(data => {
-        // Guard against stale/duplicate responses
         if (!isMounted) return;
         if (data.has_alerts && data.alerts?.length > 0) {
           setRefillAlerts(data.alerts);
           setRefillUrgency(data.urgency);
           setShowRefillBanner(true);
-
-          // Also inject the greeting as the first assistant message
-          // so it appears in the chat conversation itself
-          // Check if greeting already injected to prevent duplicates
           const greetingAlreadyInjected = messages.some(
             m => m.role === "assistant" && m.content?.includes("Before we start")
           );
           if (messages.length === 0 && data.greeting && !greetingAlreadyInjected) {
-            // Store the alerts for later handling of user confirmation
             setPendingRefillSuggestions(data.alerts);
-            // We use sendMessage with a special internal trigger:
-            // inject directly into the chat without an API call
-            // by dispatching a custom event the useChat hook can intercept
-            // — OR — simply set it as the initial welcome message via
-            // a synthetic message object. Since we can't mutate useChat's
-            // internal state, we send it as if the assistant spoke first
-            // by using a special "proactive" message injection:
             injectProactiveGreeting(data.greeting);
           }
         }
       })
-      .catch(() => { /* silently fail — refill check is non-critical */ });
+      .catch(() => {});
 
     return () => { isMounted = false; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Check if user message is a positive response to proactive refill suggestion
   const isPositiveRefillConfirmation = (text: string): boolean => {
-    const lower = text.toLowerCase().trim();
     const positivePatterns = [
-      /^yes$/i, /^yes,/i, /^yes\./i,
-      /^yeah$/i, /^yeah,/i, /^yeah\./i,
-      /^sure$/i, /^sure,$/i, /^sure\./i,
-      /^ok$/i, /^ok,$/i, /^ok\./i,
-      /^okay$/i, /^okay,$/i, /^okay\./i,
-      /^please$/i, /^please,$/i, /^please\./i,
-      /^refill$/i, /^refill$/i,
-      /^yes refill/i, /^yeah refill/i, /^yes, refill/i,
-      /^refill both/i, /^yes both/i,
+      /^yes$/i, /^yes,/i, /^yeah$/i, /^sure$/i,
+      /^ok$/i, /^okay$/i, /^please$/i, /^refill$/i,
+      /^yes refill/i, /^refill both/i, /^yes both/i,
       /^order both/i, /^get both/i,
     ];
-    return positivePatterns.some(pattern => pattern.test(lower));
+    return positivePatterns.some(p => p.test(text.toLowerCase().trim()));
   };
 
-  // Inject the proactive refill greeting directly into the chat as an
-  // assistant message — no API round-trip needed, greeting was pre-computed.
   function injectProactiveGreeting(text: string) {
     addMessage({
       role:    "assistant",
@@ -224,59 +195,45 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
     });
   }
 
-  // Auto-scroll on new messages
   useEffect(() => {
     if (activeTab === "chat") {
       bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }
   }, [messages, loading, activeTab]);
 
-  // Auto-open prescription upload + refresh history on order events
   useEffect(() => {
     if (messages.length === 0) return;
     const last = messages[messages.length - 1];
     if (last.role !== "assistant") return;
     const meta = last.meta as any;
 
-    if (meta?.prescription_rejected === true) {
-      setShowRxUpload(true);
-    }
+    if (meta?.prescription_rejected === true) setShowRxUpload(true);
 
     if (meta?.order_status === "approved" || meta?.safety_approved === true) {
       setShowRxUpload(false);
       setHistoryRefresh(prev => prev + 1);
-      // Dismiss refill banner after successful order
       setShowRefillBanner(false);
       setRefillAlerts([]);
+      // Reset voice button after successful order
+      voiceResetRef.current?.();
     }
   }, [messages]);
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!input.trim() || loading) return;
-    
     const userText = input.trim();
-    
-    // Check if user is positively responding to proactive refill suggestion
+
     if (pendingRefillSuggestions.length > 0 && isPositiveRefillConfirmation(userText)) {
-      // Clear pending suggestions first
       setPendingRefillSuggestions([]);
       setShowRefillBanner(false);
-      
-      // Build a message with all suggested medicines
-      const medicineNames = pendingRefillSuggestions.map(a => {
-        const name = a.medicine_name.split(",")[0].trim();
-        return name;
-      });
-      
-      // Send refill request for all medicines
-      const msg = `I need to order ${medicineNames.join(" and ")}`;
-      sendMessage(msg, rxUploaded, rxMedicines, paymentMethod);
+      const medicineNames = pendingRefillSuggestions.map(a => a.medicine_name.split(",")[0].trim());
+      sendMessage(`I need to order ${medicineNames.join(" and ")}`, rxUploaded, rxMedicines, paymentMethod);
       setInput("");
       setActiveTab("chat");
       return;
     }
-    
+
     setShowRxUpload(false);
     sendMessage(userText, rxUploaded, rxMedicines, paymentMethod);
     setInput("");
@@ -287,8 +244,7 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
     setShowRefillBanner(false);
     setRefillAlerts([]);
     setPendingRefillSuggestions([]);
-    const msg = `I need to order ${medicineName}`;
-    sendMessage(msg, rxUploaded, rxMedicines, paymentMethod);
+    sendMessage(`I need to order ${medicineName}`, rxUploaded, rxMedicines, paymentMethod);
     setActiveTab("chat");
   }
 
@@ -314,26 +270,20 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
       }
     }
     if (retryMsg) {
-      setTimeout(() => {
-        sendMessage(retryMsg!, true, medicines, paymentMethod);
-      }, 600);
+      setTimeout(() => sendMessage(retryMsg!, true, medicines, paymentMethod), 600);
     }
   }
 
-  // Combined handler to clear both chat messages AND prescription state
   function handleClearChat() {
-    clearChat(); // Clear messages from useChat hook
-    // Also reset prescription state
+    clearChat();
     setRxUploaded(false);
     setRxPrescId(null);
     setRxMedicines([]);
     setShowRxUpload(false);
-    // Reset any other relevant state
     setInput("");
     setActiveTab("chat");
   }
 
-  // Handler to change prescription (shows upload modal)
   function handleClearRx() {
     setRxUploaded(false);
     setRxPrescId(null);
@@ -342,12 +292,17 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
   }
 
   function handleConfirmOrder(messageId: string) {
-    // Wait for the order confirmation to complete before refreshing history
-    // This ensures the order is written to the database first
     confirmOrder(messageId).then(() => {
       setHistoryRefresh(prev => prev + 1);
     }).catch(err => {
       console.error("Order confirmation failed:", err);
+    });
+  }
+
+  function handleVoiceAudio(blob: Blob) {
+    // sendVoice(audioBlob, paymentMethod) — correct signature from useChat
+    sendVoice(blob, paymentMethod).finally(() => {
+      voiceResetRef.current?.();
     });
   }
 
@@ -366,7 +321,6 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
           </div>
         </div>
         <div className="flex items-center gap-3">
-          {/* Refill alert bell - always visible */}
           <div className="relative">
             <button
               onClick={() => setShowRefillBanner(prev => !prev)}
@@ -385,12 +339,9 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
                 </span>
               )}
             </button>
-            {/* Dropdown for no alerts message */}
             {showRefillBanner && refillAlerts.length === 0 && (
               <div className="absolute right-0 top-full mt-2 w-48 bg-surface-2 border border-white/10 rounded-lg shadow-lg p-3 z-50">
-                <p className="text-xs text-ink-muted font-body text-center">
-                  No refill alerts
-                </p>
+                <p className="text-xs text-ink-muted font-body text-center">No refill alerts</p>
               </div>
             )}
           </div>
@@ -414,9 +365,7 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
           onClick={() => setActiveTab("chat")}
           className={clsx(
             "flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-mono font-medium transition-colors",
-            activeTab === "chat"
-              ? "text-brand-400 border-b-2 border-brand-400"
-              : "text-ink-muted hover:text-ink-secondary"
+            activeTab === "chat" ? "text-brand-400 border-b-2 border-brand-400" : "text-ink-muted hover:text-ink-secondary"
           )}
         >
           <MessageSquare size={12} /> Chat
@@ -425,16 +374,14 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
           onClick={() => { setActiveTab("history"); setHistoryRefresh(prev => prev + 1); }}
           className={clsx(
             "flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-mono font-medium transition-colors",
-            activeTab === "history"
-              ? "text-brand-400 border-b-2 border-brand-400"
-              : "text-ink-muted hover:text-ink-secondary"
+            activeTab === "history" ? "text-brand-400 border-b-2 border-brand-400" : "text-ink-muted hover:text-ink-secondary"
           )}
         >
           <History size={12} /> Order History
         </button>
       </div>
 
-      {/* ── Refill Banner (shown in chat tab only) ───────────────────────────── */}
+      {/* ── Refill Banner ────────────────────────────────────────────────────── */}
       {activeTab === "chat" && showRefillBanner && refillAlerts.length > 0 && (
         <RefillBanner
           alerts    = {refillAlerts}
@@ -447,11 +394,7 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
       {/* ── History panel ───────────────────────────────────────────────────── */}
       {activeTab === "history" && (
         <div className="flex-1 overflow-hidden">
-          <OrderHistory
-            patientId={patientId}
-            onReorder={handleReorder}
-            refreshKey={historyRefresh}
-          />
+          <OrderHistory patientId={patientId} onReorder={handleReorder} refreshKey={historyRefresh} />
         </div>
       )}
 
@@ -464,7 +407,7 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
               <div className="flex flex-col items-center justify-center h-full text-center px-4">
                 <div>
                   <p className="font-display text-3xl text-ink-primary font-semibold">
-                    Welcome{patientName ? `, ${patientName.split(' ')[0]}` : ''}! 👋
+                    Welcome{patientName ? `, ${patientName.split(" ")[0]}` : ""}! 👋
                   </p>
                   <p className="font-display text-xl text-ink-primary font-semibold mt-3">
                     How can I help you today?
@@ -511,8 +454,7 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
                                 flex items-center justify-center text-xs font-display font-bold text-brand-400">
                   Rx
                 </div>
-                <div className="bg-surface-2 border border-white/5 rounded-2xl rounded-tl-sm
-                                px-4 py-3 flex items-center gap-2">
+                <div className="bg-surface-2 border border-white/5 rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-2">
                   <Loader2 size={14} className="animate-spin text-brand-400" />
                   <span className="text-xs text-ink-secondary font-mono">Agents processing...</span>
                 </div>
@@ -539,7 +481,7 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
             <div ref={bottomRef} />
           </div>
 
-          {/* ── Options bar ─────────────────────────────────────────────── */}
+          {/* ── Options bar ──────────────────────────────────────────────────── */}
           <div className="px-5 py-3 border-t border-white/5 bg-surface-1 space-y-2">
             <div className="flex items-center gap-2">
               <span className="text-[11px] text-ink-muted font-mono w-24 shrink-0">Payment:</span>
@@ -584,8 +526,7 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
                   </div>
                   <button
                     onClick={handleClearRx}
-                    className="text-[10px] text-ink-muted hover:text-ink-secondary font-mono
-                               underline underline-offset-2 transition-colors"
+                    className="text-[10px] text-ink-muted hover:text-ink-secondary font-mono underline underline-offset-2 transition-colors"
                   >
                     Change
                   </button>
@@ -606,7 +547,7 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
             </div>
           </div>
 
-          {/* ── Input bar ───────────────────────────────────────────────── */}
+          {/* ── Input bar ────────────────────────────────────────────────────── */}
           <form onSubmit={handleSubmit} className="px-4 pb-4 pt-2">
             <div className="flex items-end gap-2 bg-surface-2 border border-white/5
                             focus-within:border-brand-400/40 rounded-2xl p-2 transition-all">
@@ -622,11 +563,14 @@ export default function ChatWindow({ patientId, patientEmail, patientName }: Cha
                 placeholder="Type a medicine name or describe what you need..."
                 rows={1}
                 className="flex-1 bg-transparent text-sm text-ink-primary placeholder-ink-muted
-                           font-body resize-none focus:outline-none px-2 py-1.5
-                           min-h-[36] max-h-[120]"
+                           font-body resize-none focus:outline-none px-2 py-1.5 min-h-[36] max-h-[120]"
               />
               <div className="flex items-center gap-2 shrink-0">
-                <VoiceButton onAudioReady={(blob) => sendVoice(blob, paymentMethod)} disabled={loading} />
+                <VoiceButton
+                  onAudioReady={handleVoiceAudio}
+                  onReady={(reset) => { voiceResetRef.current = reset; }}
+                  disabled={loading}
+                />
                 <button
                   type="submit"
                   disabled={loading || !input.trim()}
