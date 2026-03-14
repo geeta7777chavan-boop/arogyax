@@ -1,4 +1,5 @@
 "use client";
+export const dynamic = "force-dynamic";
 // app/chat/page.tsx — authenticated, reads real user from Supabase
 
 import { useEffect, useState } from "react";

@@ -1,4 +1,5 @@
 "use client";
+export const dynamic = "force-dynamic";
 // app/reset-password/page.tsx
 // User lands here after clicking the reset link in their email.
 // Supabase has already exchanged the token in /auth/callback and set a session.

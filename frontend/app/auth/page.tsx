@@ -1,4 +1,5 @@
 "use client";
+export const dynamic = "force-dynamic";
 // app/auth/page.tsx — ArogyaX · Login / Signup / Forgot Password
 
 import { useEffect, useState } from "react";
