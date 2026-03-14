@@ -127,6 +127,17 @@ ALLOWED_ORIGINS = [
     *([_frontend_url] if _frontend_url else []),
 ]
 
+# Allow all Vercel preview + production URLs via regex
+# Handles: arogyax-2bt1.vercel.app AND arogyax-2bt1-xyz-prachi.vercel.app
+import re as _re
+
+def _is_allowed_origin(origin: str) -> bool:
+    if origin in ALLOWED_ORIGINS:
+        return True
+    if _re.match(r"https://arogyax.*\.vercel\.app$", origin):
+        return True
+    return False
+
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -148,8 +159,9 @@ app = FastAPI(
 app.add_middleware(TimeoutMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ALLOWED_ORIGINS,
-    allow_credentials = True,
+    allow_origins     = ["*"],   # handled by allow_origin_regex below
+    allow_origin_regex = r"https://arogyax.*\.vercel\.app|http://localhost:\d+|http://127\.0\.0\.1:\d+",
+    allow_credentials = False,   # must be False when allow_origins=["*"]
     allow_methods     = ["*"],
     allow_headers     = ["*"],
 )
