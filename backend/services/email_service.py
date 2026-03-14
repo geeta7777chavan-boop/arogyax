@@ -146,11 +146,6 @@ def _send_email(to: str, subject: str, html: str, text: str = None) -> dict:
 
     return {"success": False, "error": "No working email method available"}
 
-    except Exception as e:
-        err = str(e)
-        print(f"[Email] ❌ Failed to send to {to}: {err}")
-        return {"success": False, "error": err}
-
 
 # ── Fire-and-forget wrapper — doesn't block the agent pipeline ───────────────
 
