@@ -1,8 +1,7 @@
 "use client";
-export const dynamic = "force-dynamic";
 // app/auth/page.tsx — ArogyaX · Login / Signup / Forgot Password
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Eye, EyeOff, ArrowRight, Loader2, CheckCircle2, AlertCircle, Mail, ArrowLeft } from "lucide-react";
@@ -37,14 +36,16 @@ function ForgotSuccessScreen({
         redirectTo: `${window.location.origin}/auth/callback?next=/reset-password`,
       });
       if (error) throw error;
+      if (error) throw error;
       setResendState("sent");
       setCountdown(COOLDOWN);
       // After 4s reset label back to idle (but keep countdown running)
       setTimeout(() => setResendState("idle"), 4000);
     } catch (err: any) {
       setResendState("error");
-      setErrMsg(err?.message ?? "Failed to resend. Please try again.");
-      setTimeout(() => setResendState("idle"), 4000);
+      // Any resend failure is a rate limit or SMTP issue
+      setErrMsg("Email limit reached. Please wait a few minutes before trying again.");
+      setTimeout(() => setResendState("idle"), 6000);
     }
   }
 
@@ -219,7 +220,7 @@ function PasswordStrength({ password }: { password: string }) {
 }
 
 /* ─── Main Auth component ───────────────────────────────────────────────── */
-export default function AuthPage() {
+function AuthPageInner() {
   const router       = useRouter();
   const searchParams = useSearchParams();
   const supabase     = createClient();
@@ -268,11 +269,20 @@ export default function AuthPage() {
 
       /* ── Forgot password ── */
       if (mode === "forgot") {
-        // Always show the same success screen regardless of whether the email
-        // exists — prevents user enumeration attacks.
-        await supabase.auth.resetPasswordForEmail(email, {
+        const { error } = await supabase.auth.resetPasswordForEmail(email, {
           redirectTo: `${window.location.origin}/auth/callback?next=/reset-password`,
         });
+
+        if (error) {
+          // Any error from resetPasswordForEmail is either a rate limit or an
+          // SMTP failure — both have the same fix (wait or configure SMTP).
+          // We never need to show the raw Supabase message to the user.
+          console.error("[forgot] resetPasswordForEmail error:", error.message, error.status);
+          setGlobalErr("rate_limit");
+          return;
+        }
+
+        // Always show neutral success — never reveal if account exists
         setSuccess("forgot");
         return;
       }
@@ -385,12 +395,40 @@ export default function AuthPage() {
           </p>
         </div>
 
-        {/* Error */}
+        {/* Error — rate limit gets a special card, other errors get normal banner */}
         {globalErr && (
-          <div style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "12px 14px", borderRadius: 10, background: "#1a0c0c", border: "1px solid #ef444430", marginBottom: 22 }}>
-            <AlertCircle size={15} style={{ color: "#ef4444", flexShrink: 0, marginTop: 1 }} />
-            <p style={{ fontFamily: "'Plus Jakarta Sans',sans-serif", fontSize: 13, color: "#fca5a5", margin: 0 }}>{globalErr}</p>
-          </div>
+          globalErr === "rate_limit" ? (
+            <div style={{ borderRadius: 12, background: "#0f1a0d", border: "1px solid #2dd4a025", marginBottom: 22, overflow: "hidden" }}>
+              <div style={{ padding: "12px 14px", borderBottom: "1px solid #1a2820", display: "flex", alignItems: "center", gap: 9 }}>
+                <AlertCircle size={15} style={{ color: "#f59e0b", flexShrink: 0 }} />
+                <p style={{ fontFamily: "'Plus Jakarta Sans',sans-serif", fontSize: 13, color: "#fcd34d", margin: 0, fontWeight: 600 }}>
+                  Email limit reached
+                </p>
+              </div>
+              <div style={{ padding: "12px 14px" }}>
+                <p style={{ fontFamily: "'Plus Jakarta Sans',sans-serif", fontSize: 12, color: "#4a6b5e", lineHeight: 1.65, margin: "0 0 10px" }}>
+                  Supabase's free tier allows only a few emails per hour. You can:
+                </p>
+                <div style={{ display: "flex", flexDirection: "column" as const, gap: 7 }}>
+                  {[
+                    "Wait ~1 hour and try again",
+                    "Ask your admin to reset your password from the dashboard",
+                    "Connect SendGrid SMTP in Supabase settings for unlimited emails",
+                  ].map((tip, i) => (
+                    <div key={i} style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
+                      <span style={{ color: "#2dd4a0", fontSize: 11, marginTop: 2, flexShrink: 0 }}>→</span>
+                      <p style={{ fontFamily: "'Plus Jakarta Sans',sans-serif", fontSize: 12, color: "#5a8070", margin: 0, lineHeight: 1.5 }}>{tip}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "12px 14px", borderRadius: 10, background: "#1a0c0c", border: "1px solid #ef444430", marginBottom: 22 }}>
+              <AlertCircle size={15} style={{ color: "#ef4444", flexShrink: 0, marginTop: 1 }} />
+              <p style={{ fontFamily: "'Plus Jakarta Sans',sans-serif", fontSize: 13, color: "#fca5a5", margin: 0 }}>{globalErr}</p>
+            </div>
+          )
         )}
 
         <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -563,5 +601,14 @@ function Wrapper({ children }: { children: React.ReactNode }) {
 
       <style>{`@import url('https://fonts.cdnfonts.com/css/necosmic'); @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');`}</style>
     </div>
+  );
+}
+
+
+export default function AuthPage() {
+  return (
+    <Suspense fallback={<div style={{ minHeight:"100dvh", background:"#0a0f0d" }} />}>
+      <AuthPageInner />
+    </Suspense>
   );
 }
